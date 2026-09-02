@@ -1,0 +1,37 @@
+@import "tailwindcss";
+
+@layer base {
+  :root {
+    --font-arabic: 'IBM Plex Sans Arabic', 'Cairo', system-ui, -apple-system, sans-serif;
+    --font-mono: 'Plus Jakarta Sans', ui-monospace, SFMono-Regular, monospace;
+  }
+
+  body {
+    font-family: var(--font-arabic);
+    background-color: #090A0F;
+    color: #f4f4f5;
+    letter-spacing: -0.01em;
+  }
+}
+
+/* Subtle architectural lighting */
+.ambient-glow {
+  background: radial-gradient(800px circle at 50% -10%, rgba(99, 102, 241, 0.08), transparent 70%),
+              radial-gradient(600px circle at 50% 100%, rgba(14, 165, 233, 0.04), transparent 65%);
+}
+
+/* Custom delicate scrollbars */
+::-webkit-scrollbar {
+  width: 5px;
+  height: 5px;
+}
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+::-webkit-scrollbar-thumb {
+  background: rgba(255, 255, 255, 0.12);
+  border-radius: 9999px;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: rgba(255, 255, 255, 0.22);
+}

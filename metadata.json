@@ -1,0 +1,6 @@
+{
+  "name": "تحويل النص إلى صوت",
+  "description": "تطبيق ذكي وسريع لتحويل النصوص العربية إلى كلام مسموع ومقاطع صوتية عالية النقاء.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
