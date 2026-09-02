@@ -18,12 +18,6 @@ import { SettingsModal } from './components/SettingsModal';
 import { TTSResponse } from './types';
 import { motion, AnimatePresence } from 'motion/react';
 
-const SAMPLES = [
-  { label: 'ترحيب', text: 'أهلاً وسهلاً بك، تم تحويل هذا النص إلى مقطع صوتي مسموع فوراً.' },
-  { label: 'حكمة', text: 'العلم في الصغر كالنقش على الحجر، والعمل به يثمر النجاح.' },
-  { label: 'توضيح', text: 'يمكنك كتابة أي جملة أو فقرة هنا لتستمع إليها وتتحكم بها بسهولة.' },
-];
-
 export default function App() {
   const [text, setText] = useState('');
   const [customApiKey, setCustomApiKey] = useState<string>(() => {
@@ -49,11 +43,9 @@ export default function App() {
     }
   };
 
-  // Default sample text in Arabic
+  // Start with empty text
   useEffect(() => {
-    setText(
-      'مرحباً بك، يمكنك كتابة أي نص هنا ليتم تحويله إلى كلام مسموع فوراً وبكل سهولة.'
-    );
+    setText('');
   }, []);
 
   // Countdown timer for rate limits if any
@@ -278,25 +270,7 @@ export default function App() {
           {/* Text input area */}
           <div className="flex flex-col gap-2">
             <div className="flex items-center justify-between text-xs text-slate-400 px-1">
-              <div className="flex items-center gap-2">
-                <span className="font-medium text-slate-300">النص المطلوب:</span>
-                {/* Quick Sample Chips */}
-                <div className="hidden sm:flex items-center gap-1.5">
-                  {SAMPLES.map((s, idx) => (
-                    <button
-                      key={idx}
-                      type="button"
-                      onClick={() => {
-                        setText(s.text);
-                        if (errorMessage) setErrorMessage(null);
-                      }}
-                      className="px-2 py-0.5 rounded-md bg-slate-800/80 hover:bg-cyan-950/60 hover:text-cyan-300 hover:border-cyan-700/50 border border-slate-700/60 text-[11px] text-slate-400 transition-all cursor-pointer"
-                    >
-                      {s.label}
-                    </button>
-                  ))}
-                </div>
-              </div>
+              <span className="font-medium text-slate-300">النص المطلوب:</span>
 
               <div className="flex items-center gap-3">
                 {text.length > 0 && (
