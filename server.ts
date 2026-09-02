@@ -98,15 +98,36 @@ function parseMimeRate(mimeType: string): { sampleRate: number; bitsPerSample: n
 }
 
 /**
- * Splits long text into natural sentences/phrases for TTS synthesis
+ * Extracts raw PCM bytes by stripping WAV/RIFF headers if present
  */
-function splitTextIntoTTSChunks(text: string, maxChunkLength = 2800): string[] {
+function extractRawPcm(buffer: Buffer): Buffer {
+  if (
+    buffer.length >= 44 &&
+    buffer.subarray(0, 4).toString("ascii") === "RIFF" &&
+    buffer.subarray(8, 12).toString("ascii") === "WAVE"
+  ) {
+    // Search for 'data' chunk identifier
+    const dataIdx = buffer.indexOf("data", 12);
+    if (dataIdx !== -1 && dataIdx + 8 <= buffer.length) {
+      const dataSize = buffer.readUInt32LE(dataIdx + 4);
+      return buffer.subarray(dataIdx + 8, dataIdx + 8 + dataSize);
+    }
+    return buffer.subarray(44);
+  }
+  return buffer;
+}
+
+/**
+ * Splits arbitrary length Arabic/English text into natural, balanced chunks (~1000-1400 chars)
+ * for ultra-fast parallel generation and optimal speech cadence.
+ */
+function splitTextIntoTTSChunks(text: string, maxChunkLength = 1200): string[] {
   const clean = text.trim();
   if (clean.length <= maxChunkLength) {
     return [clean];
   }
 
-  // Split into paragraphs first
+  // 1. Split into paragraphs
   const paragraphs = clean.split(/\n+/);
   const chunks: string[] = [];
   let currentChunk = "";
@@ -115,14 +136,13 @@ function splitTextIntoTTSChunks(text: string, maxChunkLength = 2800): string[] {
     const trimmedPara = para.trim();
     if (!trimmedPara) continue;
 
-    // Check if adding this whole paragraph fits
     if ((currentChunk ? `${currentChunk}\n${trimmedPara}` : trimmedPara).length <= maxChunkLength) {
       currentChunk = currentChunk ? `${currentChunk}\n${trimmedPara}` : trimmedPara;
       continue;
     }
 
-    // Split paragraph by punctuation: Arabic and Latin delimiters (. ! ? ؟ ؛)
-    const sentences = trimmedPara.split(/([.!?؟؛\n]+)/);
+    // 2. Split paragraph by primary punctuation (. ! ? ؟ ؛ :)
+    const sentences = trimmedPara.split(/([.!?؟؛:\n]+)/);
     for (let i = 0; i < sentences.length; i += 2) {
       const sentenceText = sentences[i] || "";
       const delimiter = sentences[i + 1] || "";
@@ -137,9 +157,9 @@ function splitTextIntoTTSChunks(text: string, maxChunkLength = 2800): string[] {
           currentChunk = "";
         }
 
-        // If sentence itself is longer than maxChunkLength, split by commas (، ,)
+        // 3. Split by secondary punctuation (، , - —)
         if (sentence.length > maxChunkLength) {
-          const subParts = sentence.split(/([،,]+)/);
+          const subParts = sentence.split(/([،,\-—]+)/);
           for (let j = 0; j < subParts.length; j += 2) {
             const subText = subParts[j] || "";
             const subDelim = subParts[j + 1] || "";
@@ -152,7 +172,7 @@ function splitTextIntoTTSChunks(text: string, maxChunkLength = 2800): string[] {
               if (currentChunk) chunks.push(currentChunk);
               currentChunk = "";
 
-              // If still too long, split by individual words
+              // 4. Split by individual words
               if (subItem.length > maxChunkLength) {
                 const words = subItem.split(/\s+/);
                 for (const word of words) {
@@ -160,7 +180,15 @@ function splitTextIntoTTSChunks(text: string, maxChunkLength = 2800): string[] {
                     currentChunk = currentChunk ? `${currentChunk} ${word}` : word;
                   } else {
                     if (currentChunk) chunks.push(currentChunk);
-                    currentChunk = word;
+                    // 5. Hard slice if single word exceeds limit
+                    if (word.length > maxChunkLength) {
+                      for (let k = 0; k < word.length; k += maxChunkLength) {
+                        chunks.push(word.slice(k, k + maxChunkLength));
+                      }
+                      currentChunk = "";
+                    } else {
+                      currentChunk = word;
+                    }
                   }
                 }
               } else {
@@ -175,8 +203,8 @@ function splitTextIntoTTSChunks(text: string, maxChunkLength = 2800): string[] {
     }
   }
 
-  if (currentChunk) {
-    chunks.push(currentChunk);
+  if (currentChunk.trim()) {
+    chunks.push(currentChunk.trim());
   }
 
   return chunks.length > 0 ? chunks : [clean];
@@ -212,76 +240,116 @@ interface CacheEntry {
   timestamp: number;
 }
 const ttsCache = new Map<string, CacheEntry>();
+const chunkPcmCache = new Map<string, Buffer>();
 
 let geminiQuotaCooldownUntil = 0;
 
 /**
- * High-Fidelity Speech Synthesis using Gemini 3.1 Flash TTS model
+ * Concurrently executes an async function over items with a concurrency pool
  */
-async function synthesizeWithGemini(
+async function runConcurrent<T, R>(
+  items: T[],
+  fn: (item: T, index: number) => Promise<R>,
+  concurrency = 4
+): Promise<R[]> {
+  const results: R[] = new Array(items.length);
+  let currentIndex = 0;
+
+  async function worker() {
+    while (currentIndex < items.length) {
+      const idx = currentIndex++;
+      results[idx] = await fn(items[idx], idx);
+    }
+  }
+
+  const workers = Array.from(
+    { length: Math.min(concurrency, items.length) },
+    () => worker()
+  );
+  await Promise.all(workers);
+  return results;
+}
+
+/**
+ * High-Speed Synthesis of a single chunk with retry and caching
+ */
+async function synthesizeSingleChunk(
   ai: GoogleGenAI,
   text: string,
   voice: string
-): Promise<{ buffer: Buffer; sampleRate: number; bitsPerSample: number } | null> {
-  // If under rate-limit cooldown, return null to allow fallback
-  if (Date.now() < geminiQuotaCooldownUntil) {
-    return null;
+): Promise<Buffer> {
+  const cacheKey = `${voice}:${text}`;
+  const cached = chunkPcmCache.get(cacheKey);
+  if (cached) {
+    return cached;
   }
 
-  try {
-    const response = await ai.models.generateContent({
-      model: "gemini-3.1-flash-tts-preview",
-      contents: [
-        {
-          role: "user",
-          parts: [{ text: text }],
-        },
-      ],
-      config: {
-        temperature: 0.2,
-        responseModalities: ["AUDIO"],
-        speechConfig: {
-          voiceConfig: {
-            prebuiltVoiceConfig: {
-              voiceName: voice || "Zephyr",
+  let attempts = 0;
+  while (attempts < 3) {
+    attempts++;
+    try {
+      const response = await ai.models.generateContent({
+        model: "gemini-3.1-flash-tts-preview",
+        contents: [
+          {
+            role: "user",
+            parts: [{ text }],
+          },
+        ],
+        config: {
+          temperature: 0.2,
+          responseModalities: ["AUDIO"],
+          speechConfig: {
+            voiceConfig: {
+              prebuiltVoiceConfig: {
+                voiceName: voice || "Zephyr",
+              },
             },
           },
         },
-      },
-    });
+      });
 
-    const candidate = response.candidates?.[0];
-    const parts = candidate?.content?.parts;
+      const parts = response.candidates?.[0]?.content?.parts;
+      let rawBase64 = "";
 
-    let rawBase64 = "";
-    let incomingMime = "audio/l16; rate=24000; channels=1";
-
-    if (parts && parts.length > 0) {
-      for (const part of parts) {
-        if (part.inlineData && part.inlineData.data) {
-          rawBase64 = part.inlineData.data;
-          if (part.inlineData.mimeType) {
-            incomingMime = part.inlineData.mimeType;
+      if (parts && parts.length > 0) {
+        for (const part of parts) {
+          if (part.inlineData && part.inlineData.data) {
+            rawBase64 = part.inlineData.data;
+            break;
           }
-          break;
         }
       }
-    }
 
-    if (rawBase64) {
-      const rawBuffer = Buffer.from(rawBase64, "base64");
-      const { sampleRate, bitsPerSample } = parseMimeRate(incomingMime);
-      return { buffer: rawBuffer, sampleRate, bitsPerSample };
-    }
-  } catch (err: any) {
-    console.error("Gemini TTS API error:", err?.message || err);
-    if (isQuotaOrRateLimitError(err)) {
-      const waitSec = Math.max(30, extractRateLimitWaitSeconds(err));
-      geminiQuotaCooldownUntil = Date.now() + waitSec * 1000;
+      if (rawBase64) {
+        const rawBuffer = Buffer.from(rawBase64, "base64");
+        const pcmBuffer = extractRawPcm(rawBuffer);
+
+        chunkPcmCache.set(cacheKey, pcmBuffer);
+        if (chunkPcmCache.size > 200) {
+          const firstKey = chunkPcmCache.keys().next().value;
+          if (firstKey) chunkPcmCache.delete(firstKey);
+        }
+
+        return pcmBuffer;
+      }
+      throw new Error("لم يتم استلام بيانات صوتية من النموذج للمقطع.");
+    } catch (err: any) {
+      console.error(`Error in chunk attempt ${attempts}:`, err?.message || err);
+      if (isQuotaOrRateLimitError(err)) {
+        if (attempts < 3) {
+          await new Promise((resolve) => setTimeout(resolve, 1000 * attempts));
+          continue;
+        }
+        const waitSec = Math.max(20, extractRateLimitWaitSeconds(err));
+        geminiQuotaCooldownUntil = Date.now() + waitSec * 1000;
+        throw err;
+      }
+      if (attempts >= 3) throw err;
     }
   }
 
-  return null;
+  throw new Error("تعذر توليد صوت المقطع بعد عدة محاولات.");
 }
 
 // Health endpoint
@@ -337,7 +405,7 @@ app.post("/api/verify-key", async (req: Request, res: Response) => {
   }
 });
 
-// TTS Generation API (Ultra-fast direct synthesis with smart cache and chunking)
+// TTS Generation API (Ultra-fast direct synthesis with smart cache, parallel chunking and seamless merging)
 app.post("/api/tts", async (req: Request, res: Response) => {
   try {
     const customKey = (req.headers["x-gemini-api-key"] as string) || req.body.apiKey;
@@ -348,15 +416,10 @@ app.post("/api/tts", async (req: Request, res: Response) => {
     }
 
     const trimmedText = text.trim();
-    if (trimmedText.length > 5000) {
-      return res.status(400).json({
-        error: "النص طويل جداً (الحد الأقصى 5,000 حرف). يرجى تقليصه لتوليد الصوت بجودة مثالية.",
-      });
-    }
 
-    // Check in-memory cache for instant response (< 5ms)
-    const cacheKey = `${voice}:${trimmedText}`;
-    const cached = ttsCache.get(cacheKey);
+    // Check full in-memory cache for instant response (< 5ms)
+    const fullCacheKey = `${voice}:${trimmedText}`;
+    const cached = ttsCache.get(fullCacheKey);
     if (cached && Date.now() - cached.timestamp < 3600000) {
       return res.json({
         success: true,
@@ -367,6 +430,7 @@ app.post("/api/tts", async (req: Request, res: Response) => {
         chunksCount: cached.chunksCount,
         sampleRate: cached.sampleRate,
         cached: true,
+        engine: "gemini",
       });
     }
 
@@ -383,36 +447,42 @@ app.post("/api/tts", async (req: Request, res: Response) => {
       });
     }
 
-    // Generate speech using Gemini 3.1 Flash TTS model
-    const geminiAudio = await synthesizeWithGemini(ai, trimmedText, voice);
+    // Split text into natural, balanced chunks (~1200 characters each)
+    const chunks = splitTextIntoTTSChunks(trimmedText, 1200);
 
-    if (!geminiAudio) {
-      const waitSec = Math.max(5, Math.ceil((geminiQuotaCooldownUntil - Date.now()) / 1000));
-      return res.status(429).json({
-        success: false,
-        isQuotaExceeded: true,
-        waitSeconds: waitSec,
-        error: `تم الوصول لحد الاستخدام المؤقت لنموذج الصوت. يرجى الانتظار ${waitSec} ثانية أو استخدام مفتاحك من أيقونة الترس ⚙️.`,
-      });
+    let mergedPcm: Buffer;
+    const sampleRate = 24000;
+    const bitsPerSample = 16;
+
+    if (chunks.length === 1) {
+      // Single chunk fast path
+      mergedPcm = await synthesizeSingleChunk(ai, chunks[0], voice);
+    } else {
+      // Multi-chunk ultra-fast parallel generation (concurrency of 4)
+      const pcmList = await runConcurrent(
+        chunks,
+        async (chunkText) => {
+          return await synthesizeSingleChunk(ai, chunkText, voice);
+        },
+        4
+      );
+
+      // Seamlessly combine PCM buffers in exact order
+      mergedPcm = Buffer.concat(pcmList);
     }
 
-    const wavBuffer = convertPcmToWav(
-      geminiAudio.buffer,
-      geminiAudio.sampleRate,
-      geminiAudio.bitsPerSample,
-      1
-    );
+    // Generate RIFF WAV with exact duration calculations
+    const wavBuffer = convertPcmToWav(mergedPcm, sampleRate, bitsPerSample, 1);
     const wavBase64 = wavBuffer.toString("base64");
-    const durationSeconds =
-      geminiAudio.buffer.length /
-      (geminiAudio.sampleRate * (geminiAudio.bitsPerSample / 8));
+    const durationSeconds = mergedPcm.length / (sampleRate * (bitsPerSample / 8));
     const finalDuration = Math.round(durationSeconds * 100) / 100;
 
-    ttsCache.set(cacheKey, {
+    // Save in full cache
+    ttsCache.set(fullCacheKey, {
       audioBase64: wavBase64,
       duration: finalDuration,
-      sampleRate: geminiAudio.sampleRate,
-      chunksCount: 1,
+      sampleRate,
+      chunksCount: chunks.length,
       timestamp: Date.now(),
     });
 
@@ -427,15 +497,30 @@ app.post("/api/tts", async (req: Request, res: Response) => {
       mimeType: "audio/wav",
       duration: finalDuration,
       voice: voice || "Zephyr",
-      chunksCount: 1,
-      sampleRate: geminiAudio.sampleRate,
+      chunksCount: chunks.length,
+      sampleRate,
       engine: "gemini",
     });
   } catch (error: any) {
     console.error("TTS Generation Error:", error);
+    let errMsg = error?.message || "تعذر إكمال توليد الصوت من نموذج Gemini. يرجى المحاولة مرة أخرى.";
+    let waitSec: number | undefined;
+
+    if (isQuotaOrRateLimitError(error)) {
+      waitSec = Math.max(15, extractRateLimitWaitSeconds(error));
+      geminiQuotaCooldownUntil = Date.now() + waitSec * 1000;
+      errMsg = `تم الوصول لحد الاستخدام المؤقت. يرجى الانتظار ${waitSec} ثانية أو استخدام مفتاحك الخاص من أيقونة الترس ⚙️.`;
+      return res.status(429).json({
+        success: false,
+        isQuotaExceeded: true,
+        waitSeconds: waitSec,
+        error: errMsg,
+      });
+    }
+
     return res.status(500).json({
       success: false,
-      error: error?.message || "تعذر إكمال توليد الصوت من نموذج Gemini. يرجى المحاولة مرة أخرى.",
+      error: errMsg,
     });
   }
 });

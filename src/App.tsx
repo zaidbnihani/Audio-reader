@@ -28,6 +28,7 @@ export default function App() {
   const [currentAudioUrl, setCurrentAudioUrl] = useState<string | null>(null);
   const [currentBlob, setCurrentBlob] = useState<Blob | null>(null);
   const [audioDuration, setAudioDuration] = useState<number>(0);
+  const [chunksCount, setChunksCount] = useState<number>(1);
   const [currentEngine, setCurrentEngine] = useState<string>('gemini');
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
   const [countdown, setCountdown] = useState<number>(0);
@@ -119,6 +120,7 @@ export default function App() {
       setCurrentAudioUrl(url);
       setCurrentBlob(audioBlob);
       setAudioDuration(data.duration || 0);
+      setChunksCount(data.chunksCount || 1);
       setCurrentEngine(data.engine || 'gemini');
     } catch (err: any) {
       console.error('TTS Generation error:', err);
@@ -285,9 +287,14 @@ export default function App() {
                   </button>
                 )}
                 {text.length > 0 && (
-                  <span className="font-mono text-slate-400 text-[11px] tabular-nums">
-                    {text.length} حرف
-                  </span>
+                  <div className="flex items-center gap-1.5 font-mono text-slate-400 text-[11px] tabular-nums">
+                    <span>{text.length.toLocaleString('ar-EG')} حرف</span>
+                    {text.length > 1200 && (
+                      <span className="text-cyan-400/90 font-sans">
+                        (~{Math.ceil(text.length / 1200)} أجزاء سريعة متوازية)
+                      </span>
+                    )}
+                  </div>
                 )}
               </div>
             </div>
@@ -303,7 +310,7 @@ export default function App() {
                   setText(e.target.value);
                   if (errorMessage) setErrorMessage(null);
                 }}
-                placeholder="اكتب النص هنا ليتم تحويله إلى كلام مسموع..."
+                placeholder="اكتب أو الصق النص هنا (يقبل النصوص الطويلة والمقالات والكتب بكل سهولة وبسرعة فائقة)..."
                 className="relative w-full rounded-2xl bg-slate-900/80 border border-slate-800 hover:border-slate-700 focus:border-cyan-500/70 p-4 text-sm sm:text-base text-slate-100 placeholder-slate-500 focus:outline-none focus:ring-1 focus:ring-cyan-500/30 transition-all duration-200 resize-none min-h-[140px] leading-relaxed shadow-lg shadow-black/30"
                 dir="auto"
               />
@@ -348,10 +355,14 @@ export default function App() {
             >
               {isGenerating ? (
                 <div className="flex items-center gap-2.5">
-                  <Loader2 className="w-5 h-5 animate-spin text-white" />
-                  <span>جاري تحويل النص وسماع الصوت من نموذج Gemini...</span>
+                  <Loader2 className="w-5 h-5 animate-spin text-white shrink-0" />
+                  <span className="text-xs sm:text-sm font-semibold">
+                    {text.length > 1200
+                      ? 'جاري تقسيم ومعالجة الأجزاء بالتوازي ودمج الصوت باحترافية...'
+                      : 'جاري تحويل النص وسماع الصوت بسرعة فائقة...'}
+                  </span>
                   {/* Animated equalizer wave bars */}
-                  <div className="flex items-center gap-1 h-4 mr-1">
+                  <div className="flex items-center gap-1 h-4 mr-1 shrink-0">
                     {[0.6, 1, 0.4, 0.9, 0.7].map((scale, i) => (
                       <motion.span
                         key={i}
@@ -383,6 +394,7 @@ export default function App() {
             duration={audioDuration}
             engine={currentEngine}
             blob={currentBlob}
+            chunksCount={chunksCount}
           />
         </main>
       </motion.div>

@@ -25,6 +25,7 @@ export interface TTSResponse {
   voice?: string;
   sampleRate?: number;
   engine?: string;
+  chunksCount?: number;
   error?: string;
   isQuotaExceeded?: boolean;
   waitSeconds?: number;

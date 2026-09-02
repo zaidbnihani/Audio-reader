@@ -13,6 +13,7 @@ interface AudioPlayerProps {
   voiceName?: string;
   blob?: Blob | null;
   engine?: string;
+  chunksCount?: number;
 }
 
 export const AudioPlayer: React.FC<AudioPlayerProps> = ({
@@ -21,6 +22,7 @@ export const AudioPlayer: React.FC<AudioPlayerProps> = ({
   voiceName,
   blob,
   engine,
+  chunksCount = 1,
 }) => {
   const audioRef = useRef<HTMLAudioElement | null>(null);
   const progressBarRef = useRef<HTMLDivElement | null>(null);
